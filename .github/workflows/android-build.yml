@@ -1,0 +1,295 @@
+name: Build Android APK
+
+on:
+
+  push:
+
+    branches:
+
+      - main
+
+      - master
+
+  workflow_dispatch:
+
+jobs:
+
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout del codice
+
+        uses: actions/checkout@v4
+
+
+
+      - name: Setup Node.js
+
+        uses: actions/setup-node@v4
+
+        with:
+
+          node-version: '20'
+
+
+
+      - name: Prepara ambiente e cartella www
+
+        run: |
+
+          if [ ! -f package.json ]; then npm init -y; fi
+
+          mkdir -p www
+
+          rsync -av --exclude='www' --exclude='.github' --exclude='.git' --exclude='node_modules' . www/
+
+
+
+      - name: Installazione dipendenze e Capacitor
+
+        run: |
+
+          npm install @capacitor/core @capacitor/cli @capacitor/android @capacitor/assets
+
+
+
+      - name: Crea capacitor.config.json
+
+        run: |
+
+          cat > capacitor.config.json << 'EOF'
+
+          {
+
+            "appId": "com.icarous.gioco",
+
+            "appName": "Palestra Vitto",
+
+            "webDir": "www",
+
+            "bundledWebRuntime": false,
+
+            "server": {
+
+              "androidScheme": "https"
+
+            },
+
+            "android": {
+
+              "allowMixedContent": true
+
+            }
+
+          }
+
+          EOF
+
+
+
+      - name: Inizializza Capacitor e Android
+
+        run: |
+
+          npx cap add android
+
+          npx cap copy android
+
+
+
+      - name: Genera Icone App
+
+        run: |
+
+          if [ -f "icon.png" ]; then
+
+            echo "Trovata icon.png! Generazione icone in corso..."
+
+            mkdir -p assets
+
+            cp icon.png assets/
+
+            npx capacitor-assets generate --android
+
+          else
+
+            echo "Nessuna icon.png trovata. Procedo con l'icona di default."
+
+          fi
+
+
+
+      - name: Forza Landscape Fullscreen Immersive nel Manifest
+
+        run: |
+
+          MANIFEST=android/app/src/main/AndroidManifest.xml
+
+
+
+          # Forza sensorLandscape sull'activity principale
+
+          sed -i 's/android:name="\.MainActivity"/android:name=".MainActivity" android:screenOrientation="sensorLandscape"/' "$MANIFEST"
+
+
+
+          echo "Manifest dopo le modifiche:"
+
+          grep -A5 "MainActivity" "$MANIFEST"
+
+
+
+      - name: Crea styles.xml con tema Fullscreen Immersive
+
+        run: |
+
+          mkdir -p android/app/src/main/res/values
+
+
+
+          # NOTA: tools:targetApi rimosso perché richiede xmlns:tools e causa build failure.
+
+          # android:windowLayoutInDisplayCutoutMode viene impostato via codice in MainActivity.
+
+          cat > android/app/src/main/res/values/styles.xml << 'EOF'
+
+          <?xml version="1.0" encoding="utf-8"?>
+
+          <resources>
+
+              <style name="AppTheme" parent="Theme.AppCompat.Light.NoActionBar">
+
+                  <item name="android:windowBackground">@android:color/black</item>
+
+              </style>
+
+
+
+              <style name="AppTheme.NoActionBarLaunch" parent="AppTheme">
+
+                  <item name="android:windowFullscreen">true</item>
+
+                  <item name="android:windowContentOverlay">@null</item>
+
+                  <item name="android:windowIsTranslucent">false</item>
+
+                  <item name="android:windowBackground">@android:color/black</item>
+
+              </style>
+
+          </resources>
+
+          EOF
+
+
+
+          # Applica il tema NoActionBarLaunch all'activity
+
+          sed -i 's/android:theme="@style\/AppTheme[^"]*"/android:theme="@style\/AppTheme.NoActionBarLaunch"/' \
+
+            android/app/src/main/AndroidManifest.xml
+
+
+
+      - name: Inietta codice Immersive Mode in MainActivity.java
+
+        run: |
+
+          MAIN_ACTIVITY=$(find android -name "MainActivity.java" | head -1)
+
+          echo "MainActivity trovata: $MAIN_ACTIVITY"
+
+
+
+          # Aggiungi import necessari dopo il package statement
+
+          # Nota: WindowInsetsController è API 30 (Android 11+), usiamo compat per retrocompatibilità
+
+          sed -i '/^package /a import android.os.Build;\nimport android.view.View;\nimport android.view.WindowManager;\nimport androidx.core.view.WindowCompat;\nimport androidx.core.view.WindowInsetsCompat;\nimport androidx.core.view.WindowInsetsControllerCompat;' "$MAIN_ACTIVITY"
+
+
+
+          # Inietta fullscreen immersive moderno subito dopo super.onCreate
+
+          # WindowInsetsControllerCompat NON intercetta il primo touch a differenza dei vecchi SYSTEM_UI_FLAG
+
+          sed -i 's/super\.onCreate(savedInstanceState);/super.onCreate(savedInstanceState);\n\n        \/\/ Fullscreen Immersive Mode - API moderna (non intercetta il primo touch)\n        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);\n        WindowCompat.setDecorFitsSystemWindows(getWindow(), false);\n        WindowInsetsControllerCompat insetsController =\n            WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());\n        if (insetsController != null) {\n            insetsController.hide(WindowInsetsCompat.Type.statusBars() | WindowInsetsCompat.Type.navigationBars());\n            insetsController.setSystemBarsBehavior(\n                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE\n            );\n        }/' "$MAIN_ACTIVITY"
+
+
+
+          echo "MainActivity aggiornata:"
+
+          head -70 "$MAIN_ACTIVITY"
+
+
+
+      - name: Fix Kotlin Duplicate Classes e aggiungi dipendenza AndroidX Core
+
+        run: |
+
+          cat << 'EOF' >> android/app/build.gradle
+
+
+
+          dependencies {
+
+              implementation "androidx.core:core-ktx:1.12.0"
+
+              modules {
+
+                  module("org.jetbrains.kotlin:kotlin-stdlib-jdk7") {
+
+                      replacedBy("org.jetbrains.kotlin:kotlin-stdlib", "kotlin-stdlib-jdk7 is now part of kotlin-stdlib")
+
+                  }
+
+                  module("org.jetbrains.kotlin:kotlin-stdlib-jdk8") {
+
+                      replacedBy("org.jetbrains.kotlin:kotlin-stdlib", "kotlin-stdlib-jdk8 is now part of kotlin-stdlib")
+
+                  }
+
+              }
+
+          }
+
+          EOF
+
+
+
+      - name: Setup Java (JDK 21)
+
+        uses: actions/setup-java@v4
+
+        with:
+
+          distribution: 'zulu'
+
+          java-version: '21'
+
+
+
+      - name: Build APK (Gradle)
+
+        run: |
+
+          cd android
+
+          chmod +x gradlew
+
+          ./gradlew assembleDebug
+
+
+
+      - name: Carica APK come Artefatto
+
+        uses: actions/upload-artifact@v4
+
+        with:
+
+          name: gioco-debug-apk
+
+          path: android/app/build/outputs/apk/debug/app-debug.apk
